@@ -26,7 +26,6 @@ def main():
         resp = requests.post(UPLOAD_URL, files={'files[]': f})
 
     if 200 <= resp.status_code < 300 and resp.json().get('success'):
-        resp_json = resp.json()
         filename = resp.json()['files'][0]['url']
         url = FILE_URL.format(filename=filename)
         subprocess.run(['xclip', '-i'], input=url.encode())
