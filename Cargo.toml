@@ -1,0 +1,22 @@
+[package]
+name = "pomf"
+version = "0.1.0"
+authors = ["Dominik Miedziński <dominik@mdzn.pl>"]
+keywords = ["pomf"]
+description = "Automatically upload files to pomf and copy URL to clipboard"
+homepage = "https://github.com/miedzinski/pomf"
+license = "GPL-3.0"
+readme = "README.md"
+
+[dependencies]
+clap = "2.24.2"
+clipboard = "0.3.0"
+error-chain = "0.10.0"
+inotify = "0.4.0"
+hyper = "0.10.10"
+hyper-native-tls = "0.2.2"
+lazy_static = "0.2.8"
+multipart = "0.12.0"
+serde = "1.0.7"
+serde_derive = "1.0.7"
+serde_json = "1.0.2"
