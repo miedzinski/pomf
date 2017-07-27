@@ -9,9 +9,11 @@ extern crate multipart;
 extern crate serde_derive;
 extern crate serde_json;
 
-use std::error::Error;
+mod error;
+
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process;
 
 use clap::{AppSettings, Arg, SubCommand};
 use clipboard::{ClipboardContext, ClipboardProvider};
@@ -23,10 +25,12 @@ use hyper::net::HttpsConnector;
 use hyper_native_tls::NativeTlsClient;
 use multipart::client::Multipart;
 
+use error::{Error, Result};
+
 static UPLOAD_URL: &str = "https://cocaine.ninja/upload.php";
 
 #[derive(Debug, Deserialize)]
-struct PomfFile {
+struct File {
     hash: String,
     name: String,
     url: String,
@@ -34,71 +38,86 @@ struct PomfFile {
 }
 
 #[derive(Debug, Deserialize)]
-struct PomfResponse {
+struct Response {
     success: bool,
-    files: Vec<PomfFile>,
+    files: Vec<File>,
 }
 
-fn xdg_user_dir(dir: &str) -> PathBuf {
-    let output = Command::new("xdg-user-dir")
+fn xdg_user_dir(dir: &str) -> Result<PathBuf> {
+    let output = process::Command::new("xdg-user-dir")
         .arg(dir)
         .output()
-        .expect(&format!("Couldn't get XDG_{}_DIR", dir));
-    PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+        .map_err(|e| Error::Xdg(e))?;
+    Ok(PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
 }
 
-struct Pomf {
+fn fail(msg: &str) -> ! {
+    let _ = io::stderr().write_all(msg.as_bytes());
+    process::exit(1);
+}
+
+struct Uploader {
     upload_url: Url,
     connector: HttpsConnector<NativeTlsClient>,
 }
 
-impl Pomf {
-    fn new<S: AsRef<str>>(upload_url: S) -> Pomf {
-        let tls = NativeTlsClient::new().expect("Failed to initialize HTTPS client");
-        let upload_url: Url = upload_url
-            .as_ref()
-            .parse()
-            .expect("Failed to parse upload url");
-        Pomf {
+impl Uploader {
+    fn new(upload_url: &str) -> Result<Uploader> {
+        let tls = NativeTlsClient::new()?;
+        let upload_url: Url = upload_url.parse()?;
+        Ok(Uploader {
             connector: HttpsConnector::new(tls),
             upload_url,
-        }
+        })
     }
 
-    fn upload<P: AsRef<Path>>(&self, path: P) -> Result<Url, Box<Error>> {
+    fn upload<P: AsRef<Path>>(&self, path: P) -> Result<Url> {
         let request =
             Request::with_connector(Method::Post, self.upload_url.clone(), &self.connector)?;
         let mut multipart = Multipart::from_request(request)?;
         multipart.write_file("files[]", path)?;
-        let response: PomfResponse = serde_json::from_reader(multipart.send()?)?;
-        response.files[0].url.parse().map_err(Into::into)
+        let response: Response = serde_json::from_reader(multipart.send()?)?;
+        if response.success && response.files.len() > 0 {
+            Ok(response.files[0].url.parse()?)
+        } else {
+            Err(Error::ServerError)
+        }
+    }
+}
+
+struct Watcher {
+    uploader: Uploader,
+    clipboard: ClipboardContext,
+    dir: PathBuf,
+    watch: Inotify,
+}
+
+impl Watcher {
+    fn new(uploader: Uploader, dir: PathBuf) -> Result<Watcher> {
+        if !dir.is_dir() {
+            return Err(Error::NotADirectory(dir));
+        }
+        let clipboard: ClipboardContext = ClipboardProvider::new()
+            .map_err(|e| Error::Clipboard(e))?;
+        let mut watch = Inotify::init().map_err(|e| Error::Watch(e))?;
+        watch.add_watch(&dir, watch_mask::CLOSE_WRITE).map_err(|e| Error::Watch(e))?;
+        Ok(Watcher { uploader, clipboard, dir, watch })
     }
 
-    fn watch<P: AsRef<Path>>(&self, dir: P) {
-        let dir = dir.as_ref();
-        if !dir.is_dir() {
-            panic!("Not a directory: {:?}", dir);
-        }
-        let mut clipboard: ClipboardContext =
-            ClipboardProvider::new().expect("Failed to initialize clipboard provider");
-        let mut inotify = Inotify::init().expect("Failed to initialize inotify");
-        inotify
-            .add_watch(dir, watch_mask::CLOSE_WRITE)
-            .expect("Failed to add inotify watch");
+    fn watch(mut self) {
         let mut buffer = [0u8; 4096];
         loop {
-            let events = inotify.read_events_blocking(&mut buffer).unwrap();
+            let events = self.watch.read_events_blocking(&mut buffer).unwrap();
             for event in events {
-                let path = dir.join(event.name);
-                println!("uploading {:?}...", path);
-                match self.upload(path) {
+                let path = self.dir.join(event.name);
+                match self.uploader.upload(path) {
                     Ok(url) => {
                         let url = url.to_string();
                         println!("{}", url);
-                        let _ = clipboard.set_contents(url);
+                        let _ = self.clipboard.set_contents(url);
                     }
                     Err(err) => {
-                        println!("error: {}", err);
+                        eprintln!("failed to upload: {:?}", err);
                     }
                 }
             }
@@ -120,23 +139,39 @@ fn main() {
             .get_matches();
 
     let upload_url = matches.value_of("upload-url").unwrap_or(UPLOAD_URL);
-    let pomf = Pomf::new(upload_url);
+    let uploader = match Uploader::new(upload_url) {
+        Ok(pomf) => pomf,
+        Err(err) => {
+            fail(&format!("failed to initialize client: {:?}", err));
+        }
+    };
 
     match matches.subcommand_name() {
         Some("upload") => {
             let matches = matches.subcommand_matches("upload").unwrap();
             let path = matches.value_of("FILE").unwrap();
-            let url = pomf.upload(path).unwrap();
-            println!("{}", url);
+            match uploader.upload(path) {
+                Ok(url) => println!("{}", url),
+                Err(err) => fail(&format!("failed to upload: {:?}", err)),
+            }
         }
         Some("watch") => {
             let matches = matches.subcommand_matches("watch").unwrap();
             let path = match matches.value_of("DIR") {
                 Some("XDG_PICTURES_DIR") |
-                None => xdg_user_dir(&"PICTURES"),
+                None => match xdg_user_dir(&"PICTURES") {
+                    Ok(path) => path,
+                    Err(err) => fail(&format!("failed to get XDG_PICTURES_DIR: {:?}", err)),
+                },
                 Some(path) => PathBuf::from(path),
             };
-            pomf.watch(path);
+            let watcher = match Watcher::new(uploader, path) {
+                Ok(watcher) => watcher,
+                Err(err) => {
+                    fail(&format!("failed to initialize watch: {:?}", err));
+                }
+            };
+            watcher.watch();
         }
         _ => (),
     }
