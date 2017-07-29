@@ -11,7 +11,6 @@ extern crate serde_json;
 
 mod error;
 
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -49,11 +48,6 @@ fn xdg_user_dir(dir: &str) -> Result<PathBuf> {
         .output()
         .map_err(|e| Error::Xdg(e))?;
     Ok(PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
-}
-
-fn fail(msg: &str) -> ! {
-    let _ = io::stderr().write_all(msg.as_bytes());
-    process::exit(1);
 }
 
 struct Uploader {
@@ -125,7 +119,7 @@ impl Watcher {
     }
 }
 
-fn main() {
+fn run() -> Result<()> {
     let matches =
         app_from_crate!()
             .setting(AppSettings::SubcommandRequiredElseHelp)
@@ -142,7 +136,8 @@ fn main() {
     let uploader = match Uploader::new(upload_url) {
         Ok(pomf) => pomf,
         Err(err) => {
-            fail(&format!("failed to initialize client: {:?}", err));
+            eprintln!("failed to initialize client: {:?}", err);
+            return Err(err);
         }
     };
 
@@ -151,8 +146,14 @@ fn main() {
             let matches = matches.subcommand_matches("upload").unwrap();
             let path = matches.value_of("FILE").unwrap();
             match uploader.upload(path) {
-                Ok(url) => println!("{}", url),
-                Err(err) => fail(&format!("failed to upload: {:?}", err)),
+                Ok(url) => {
+                    println!("{}", url);
+                    Ok(())
+                }
+                Err(err) => {
+                    eprintln!("failed to upload: {:?}", err);
+                    Err(err)
+                }
             }
         }
         Some("watch") => {
@@ -161,18 +162,29 @@ fn main() {
                 Some("XDG_PICTURES_DIR") |
                 None => match xdg_user_dir(&"PICTURES") {
                     Ok(path) => path,
-                    Err(err) => fail(&format!("failed to get XDG_PICTURES_DIR: {:?}", err)),
+                    Err(err) => {
+                        eprintln!("failed to get XDG_PICTURES_DIR: {:?}", err);
+                        return Err(err);
+                    }
                 },
                 Some(path) => PathBuf::from(path),
             };
             let watcher = match Watcher::new(uploader, path) {
                 Ok(watcher) => watcher,
                 Err(err) => {
-                    fail(&format!("failed to initialize watch: {:?}", err));
+                    eprintln!("failed to initialize watch: {:?}", err);
+                    return Err(err);
                 }
             };
             watcher.watch();
+            Ok(())
         }
-        _ => (),
+        _ => unreachable!(),
+    }
+}
+
+fn main() {
+    if let Err(_) = run() {
+        process::exit(1);
     }
 }
