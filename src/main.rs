@@ -26,8 +26,6 @@ use multipart::client::Multipart;
 
 use error::{Error, Result};
 
-static UPLOAD_URL: &str = "https://cocaine.ninja/upload.php";
-
 #[derive(Debug, Deserialize)]
 struct File {
     hash: String,
@@ -129,10 +127,11 @@ fn run() -> Result<()> {
             .subcommand(SubCommand::with_name("watch")
                             .arg(Arg::from_usage("[DIR] 'Set up watch on DIR'")
                                      .default_value("XDG_PICTURES_DIR")))
-            .arg(Arg::from_usage("--upload-url=[URL] 'Upload URL'").default_value(UPLOAD_URL))
+            .arg(Arg::from_usage("--upload-url=[URL] 'Upload URL'")
+                 .required(true))
             .get_matches();
 
-    let upload_url = matches.value_of("upload-url").unwrap_or(UPLOAD_URL);
+    let upload_url = matches.value_of("upload-url").unwrap();
     let uploader = match Uploader::new(upload_url) {
         Ok(pomf) => pomf,
         Err(err) => {
